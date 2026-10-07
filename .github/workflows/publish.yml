@@ -37,6 +37,11 @@ jobs:
               headers, _, message = git('cat-file', 'commit', old).partition(b'\n\n')
               tree = next(x.split()[1].decode() for x in headers.splitlines() if x.startswith(b'tree '))
               parents = [x.split()[1].decode() for x in headers.splitlines() if x.startswith(b'parent ')]
+              author_email = git('show', '-s', '--format=%ae', old).decode().strip()
+              committer_email = git('show', '-s', '--format=%ce', old).decode().strip()
+              if author_email == os.environ['COMPOSA_ANON_EMAIL'] and ('noreply' in committer_email and committer_email.endswith('github.com')) and all(rewritten[p] == p for p in parents):
+                  rewritten[old] = old
+                  continue
               env = os.environ.copy()
               env['GIT_AUTHOR_NAME'] = git('show', '-s', '--format=%an', old).decode().strip()
               env['GIT_COMMITTER_NAME'] = git('show', '-s', '--format=%cn', old).decode().strip()
@@ -49,8 +54,9 @@ jobs:
               rewritten[old] = git(*args, input=message, env=env).decode().strip()
           after = rewritten[before]
           subprocess.run(['git', 'diff', '--exit-code', before, after], check=True)
-          subprocess.run(['git', 'push', f'--force-with-lease=refs/heads/main:{before}', 'origin', f'{after}:refs/heads/main'], check=True)
-          print(f'Anonymized {len(revisions)} commits; all repository files retained.')
+          if after != before:
+              subprocess.run(['git', 'push', f'--force-with-lease=refs/heads/main:{before}', 'origin', f'{after}:refs/heads/main'], check=True)
+          print(f'Checked {len(revisions)} anonymous commits; all repository files retained.')
           PY
 
       - name: Download the pinned upstream source
@@ -156,6 +162,25 @@ jobs:
           releases = api('GET', base + '/releases?per_page=100')
           candidates = [r for r in releases if r['tag_name'] == tag or (r['draft'] and r['name'] == title)]
           assert len(candidates) <= 1, 'Ambiguous existing release drafts'
+          approved = {
+              'Composa-1.4.0-zh-CN-win-x64.zip': ('sha256:9f6b6dd22fb05d87aae16f4ad109cee99f961de4a5746b22f58e7eeb5f476c6c', 99305524),
+              'Composa-1.4.0-zh-CN-source.zip': ('sha256:154efde3c7268511849570c2c2074bd48a7c5f554472af8720e7514f6a9d2704', 9674241),
+              'SHA256SUMS.txt': ('sha256:3c83c0e26cba0d751383eb4faea39c2482773905cc5f7db76d165f628e48d5b8', 197),
+          }
+          if candidates:
+              candidate = candidates[0]
+              attachments = {a['name']: a for a in candidate['assets']}
+              if set(attachments) == set(approved) and all(attachments[n]['digest'] == d and attachments[n]['size'] == size for n, (d, size) in approved.items()):
+                  if candidate['draft']:
+                      candidate = api('PATCH', base + '/releases/' + str(candidate['id']), {'tag_name': tag, 'target_commitish': 'main', 'name': title, 'body': notes, 'draft': False, 'prerelease': False, 'make_latest': 'true'})
+                  assert not candidate['draft']
+                  for attachment in candidate['assets']:
+                      request = urllib.request.Request(attachment['browser_download_url'], headers={'User-Agent': 'Composa-zh-publication'}, method='HEAD')
+                      with urllib.request.urlopen(request, timeout=90) as response:
+                          assert response.status == 200
+                      print('Public download verified:', attachment['name'])
+                  print('Published verified original local packages:', candidate['html_url'])
+                  raise SystemExit(0)
           body = {'tag_name': tag, 'target_commitish': 'main', 'name': title, 'body': notes, 'draft': True, 'prerelease': False}
           if candidates:
               release = candidates[0]
